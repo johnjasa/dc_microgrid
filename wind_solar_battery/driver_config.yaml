@@ -1,0 +1,5 @@
+name: "driver_config"
+description: "Runs a wind, pv, and battery plant"
+
+general:
+  folder_output: wind_pv_battery_run
