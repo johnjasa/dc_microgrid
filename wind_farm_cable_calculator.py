@@ -153,9 +153,33 @@ def calculate_total_cable_length(turbine_positions: np.ndarray,
     return total_length
 
 
-def calculate_cable_costs(total_cable_length_m: float) -> dict:
+def calculate_installation_cost_multiplier(num_cables: int) -> float:
     """
-    Calculate cable costs for different cable scenarios.
+    Calculate installation cost multiplier based on number of overlapping cables.
+    Uses diminishing returns: 1 cable = 1.0x, 2 = 1.6x, 3 = 2.0x, 4 = 2.2x, etc.
+    
+    Args:
+        num_cables: Number of cables in the bundle
+        
+    Returns:
+        Installation cost multiplier
+    """
+    if num_cables <= 1:
+        return 1.0
+    elif num_cables == 2:
+        return 1.6
+    elif num_cables == 3:
+        return 2.0
+    elif num_cables == 4:
+        return 2.2
+    else:
+        # For 5+ cables, continue with diminishing returns
+        return 2.2 + (num_cables - 4) * 0.1
+
+
+def calculate_cable_costs_radial(total_cable_length_m: float) -> dict:
+    """
+    Calculate cable costs for radial cable layout (original method).
     
     Args:
         total_cable_length_m: Total cable length in meters
@@ -173,14 +197,21 @@ def calculate_cable_costs(total_cable_length_m: float) -> dict:
         'MVDC': 9.0     # $9/ft for MVDC
     }
     
+    # Installation costs per foot (base cost for single cable)
+    installation_costs_per_ft = {
+        'LVDC': 120.0,  # $120/ft for LVDC installation
+        'MVAC': 12.0,   # $12/ft for MVAC installation
+        'MVDC': 9.0     # $9/ft for MVDC installation
+    }
+    
     cost_results = {}
     
     for cable_type, cost_per_ft in cable_costs_per_ft.items():
         # Calculate cable cost
         cable_cost = total_cable_length_ft * cost_per_ft
         
-        # Calculate installation cost (2x cable cost)
-        installation_cost = cable_cost
+        # Calculate installation cost (equal to cable cost for radial)
+        installation_cost = total_cable_length_ft * installation_costs_per_ft[cable_type]
         
         # Calculate total cost
         total_cost = cable_cost + installation_cost
@@ -190,18 +221,217 @@ def calculate_cable_costs(total_cable_length_m: float) -> dict:
             'installation_cost_usd': installation_cost,
             'total_cost_usd': total_cost,
             'cost_per_ft_usd': cost_per_ft,
+            'installation_cost_per_ft_usd': installation_costs_per_ft[cable_type],
             'total_cable_length_ft': total_cable_length_ft
         }
     
     return cost_results
 
 
+def calculate_cable_costs_branched(cable_segments: List[dict]) -> dict:
+    """
+    Calculate cable costs for branched cable layout with bundling benefits.
+    
+    Args:
+        cable_segments: List of cable segments with length and cable count
+        
+    Returns:
+        Dictionary with cost calculations for different scenarios
+    """
+    # Cable costs per foot
+    cable_costs_per_ft = {
+        'LVDC': 120.0,  # $120/ft for LVDC
+        'MVAC': 12.0,   # $12/ft for MVAC
+        'MVDC': 9.0     # $9/ft for MVDC
+    }
+    
+    # Installation costs per foot (base cost for single cable)
+    installation_costs_per_ft = {
+        'LVDC': 120.0,  # $120/ft for LVDC installation
+        'MVAC': 12.0,   # $12/ft for MVAC installation
+        'MVDC': 9.0     # $9/ft for MVDC installation
+    }
+    
+    cost_results = {}
+    
+    for cable_type, cost_per_ft in cable_costs_per_ft.items():
+        cable_cost = 0.0
+        installation_cost = 0.0
+        total_cable_length_ft = 0.0
+        
+        for segment in cable_segments:
+            length_ft = segment['length_m'] * 3.28084
+            num_cables = segment['cable_count']
+            
+            # Cable cost scales linearly with number of cables
+            segment_cable_cost = length_ft * cost_per_ft * num_cables
+            
+            # Installation cost uses bundling multiplier
+            multiplier = calculate_installation_cost_multiplier(num_cables)
+            segment_installation_cost = length_ft * installation_costs_per_ft[cable_type] * multiplier
+            
+            cable_cost += segment_cable_cost
+            installation_cost += segment_installation_cost
+            total_cable_length_ft += length_ft * num_cables
+        
+        # Calculate total cost
+        total_cost = cable_cost + installation_cost
+        
+        cost_results[cable_type] = {
+            'cable_cost_usd': cable_cost,
+            'installation_cost_usd': installation_cost,
+            'total_cost_usd': total_cost,
+            'cost_per_ft_usd': cost_per_ft,
+            'installation_cost_per_ft_usd': installation_costs_per_ft[cable_type],
+            'total_cable_length_ft': total_cable_length_ft,
+            'cable_segments': cable_segments
+        }
+    
+    return cost_results
+
+
+def create_branched_cable_layout(turbine_positions: np.ndarray, 
+                               substation_positions: np.ndarray,
+                               assignments: List[int]) -> List[dict]:
+    """
+    Create a branched cable layout where cables go from substation through turbines.
+    
+    Args:
+        turbine_positions: Array of turbine positions
+        substation_positions: Array of substation positions
+        assignments: List of substation assignments for each turbine
+        
+    Returns:
+        List of cable segments with their properties
+    """
+    cable_segments = []
+    
+    # Group turbines by substation
+    substation_groups = {}
+    for i, assignment in enumerate(assignments):
+        if assignment not in substation_groups:
+            substation_groups[assignment] = []
+        substation_groups[assignment].append(i)
+    
+    # For each substation, create a branched network using minimum spanning tree
+    for substation_idx, turbine_indices in substation_groups.items():
+        substation_pos = substation_positions[substation_idx]
+        
+        if len(turbine_indices) == 0:
+            continue
+            
+        # Get positions of turbines assigned to this substation
+        group_turbines = [(i, turbine_positions[i]) for i in turbine_indices]
+        
+        # Create minimum spanning tree from substation to all turbines
+        remaining_turbines = group_turbines.copy()
+        connected_turbines = set()
+        
+        # Start by connecting the closest turbine to the substation
+        min_distance = float('inf')
+        closest_turbine = None
+        
+        for turbine_idx, turbine_pos in remaining_turbines:
+            distance = np.sqrt((turbine_pos[0] - substation_pos[0])**2 + 
+                             (turbine_pos[1] - substation_pos[1])**2)
+            if distance < min_distance:
+                min_distance = distance
+                closest_turbine = (turbine_idx, turbine_pos)
+        
+        # Connect first turbine to substation
+        turbine_idx, turbine_pos = closest_turbine
+        cable_segments.append({
+            'from_idx': -1,  # -1 indicates substation
+            'to_idx': turbine_idx,
+            'from_pos': substation_pos,
+            'to_pos': turbine_pos,
+            'length_m': min_distance,
+            'cable_count': len(remaining_turbines),  # All turbines route through this connection
+            'substation_idx': substation_idx
+        })
+        
+        connected_turbines.add(turbine_idx)
+        remaining_turbines.remove(closest_turbine)
+        
+        # Connect remaining turbines using minimum spanning tree approach
+        while remaining_turbines:
+            min_distance = float('inf')
+            closest_connection = None
+            
+            # Find the closest remaining turbine to any connected turbine
+            for turbine_idx, turbine_pos in remaining_turbines:
+                # Check distance to substation
+                dist_to_substation = np.sqrt((turbine_pos[0] - substation_pos[0])**2 + 
+                                           (turbine_pos[1] - substation_pos[1])**2)
+                
+                # Check distance to each connected turbine
+                for connected_idx in connected_turbines:
+                    connected_pos = turbine_positions[connected_idx]
+                    dist_to_connected = np.sqrt((turbine_pos[0] - connected_pos[0])**2 + 
+                                              (turbine_pos[1] - connected_pos[1])**2)
+                    
+                    # Choose the shorter connection
+                    if dist_to_connected < dist_to_substation and dist_to_connected < min_distance:
+                        min_distance = dist_to_connected
+                        closest_connection = {
+                            'turbine': (turbine_idx, turbine_pos),
+                            'connect_to': (connected_idx, connected_pos),
+                            'distance': dist_to_connected
+                        }
+                    elif dist_to_substation < min_distance and dist_to_connected >= dist_to_substation:
+                        min_distance = dist_to_substation
+                        closest_connection = {
+                            'turbine': (turbine_idx, turbine_pos),
+                            'connect_to': (-1, substation_pos),
+                            'distance': dist_to_substation
+                        }
+            
+            # Add the closest connection
+            if closest_connection:
+                turbine_idx, turbine_pos = closest_connection['turbine']
+                connect_idx, connect_pos = closest_connection['connect_to']
+                
+                # Cable count is number of remaining turbines (including this one)
+                cable_count = len(remaining_turbines)
+                
+                cable_segments.append({
+                    'from_idx': connect_idx,
+                    'to_idx': turbine_idx,
+                    'from_pos': connect_pos,
+                    'to_pos': turbine_pos,
+                    'length_m': closest_connection['distance'],
+                    'cable_count': cable_count,
+                    'substation_idx': substation_idx
+                })
+                
+                connected_turbines.add(turbine_idx)
+                remaining_turbines.remove(closest_connection['turbine'])
+    
+    return cable_segments
+
+
+def calculate_total_cable_length_branched(cable_segments: List[dict]) -> float:
+    """
+    Calculate total cable length for branched layout.
+    
+    Args:
+        cable_segments: List of cable segments
+        
+    Returns:
+        Total cable length in meters (counting multiple cables)
+    """
+    total_length = 0.0
+    for segment in cable_segments:
+        total_length += segment['length_m'] * segment['cable_count']
+    return total_length
 def plot_wind_farm(turbine_positions: np.ndarray, 
                    substation_positions: np.ndarray,
                    assignments: List[int],
                    turbine_diameter_m: float,
                    total_cable_length: float,
-                   cable_costs: dict = None):
+                   cable_costs: dict = None,
+                   cable_segments: List[dict] = None,
+                   layout_type: str = "radial"):
     """
     Create a matplotlib plot showing the wind farm layout.
     
@@ -212,20 +442,41 @@ def plot_wind_farm(turbine_positions: np.ndarray,
         turbine_diameter_m: Turbine diameter for scaling
         total_cable_length: Total cable length for title
         cable_costs: Dictionary with cable cost information
+        cable_segments: List of cable segments for branched layout
+        layout_type: "radial" or "branched"
     """
-    plt.figure(figsize=(10, 8))
+    plt.figure(figsize=(12, 10))
     
     # Define colors for different substations
     colors = ['red', 'blue', 'green', 'orange', 'purple']
     
-    # Plot cables from turbines to substations
-    for i, turbine_pos in enumerate(turbine_positions):
-        substation_idx = assignments[i]
-        substation_pos = substation_positions[substation_idx]
-        
-        plt.plot([turbine_pos[0], substation_pos[0]], 
-                [turbine_pos[1], substation_pos[1]], 
-                color=colors[substation_idx], alpha=0.3, linewidth=2.0)
+    if layout_type == "radial" or cable_segments is None:
+        # Plot cables from turbines to substations (radial)
+        for i, turbine_pos in enumerate(turbine_positions):
+            substation_idx = assignments[i]
+            substation_pos = substation_positions[substation_idx]
+            
+            plt.plot([turbine_pos[0], substation_pos[0]], 
+                    [turbine_pos[1], substation_pos[1]], 
+                    color=colors[substation_idx], alpha=0.3, linewidth=2.0)
+    else:
+        # Plot branched cable layout
+        for segment in cable_segments:
+            from_pos = segment['from_pos']
+            to_pos = segment['to_pos']
+            cable_count = segment['cable_count']
+            substation_idx = segment['substation_idx']
+            
+            # Line thickness based on number of cables
+            linewidth = 1.0 + cable_count * 0.5
+            alpha = 0.4 + min(cable_count * 0.1, 0.4)
+            
+            plt.plot([from_pos[0], to_pos[0]], 
+                    [from_pos[1], to_pos[1]], 
+                    color=colors[substation_idx], 
+                    alpha=alpha, 
+                    linewidth=linewidth,
+                    label=f'{cable_count} cables' if cable_count > 1 else None)
     
     # Plot turbines
     for i, turbine_pos in enumerate(turbine_positions):
@@ -242,30 +493,34 @@ def plot_wind_farm(turbine_positions: np.ndarray,
     
     plt.xlabel('Distance (m)')
     plt.ylabel('Distance (m)')
-    plt.title(f'Wind Farm Layout for 450MW Farm\nTotal Cable Length: {total_cable_length/1000:.2f} km')
+    plt.title(f'Wind Farm Layout for 450MW Farm ({layout_type.title()} Layout)\nTotal Cable Length: {total_cable_length/1000:.2f} km')
     plt.legend()
     plt.grid(True, alpha=0.3)
     plt.axis('equal')
     
     # Add turbine count annotation
-    info_text = f'Turbines: {len(turbine_positions)}'
+    info_text = f'Turbines: {len(turbine_positions)}\nLayout: {layout_type.title()}'
     if cable_costs:
         info_text += f'\nCable Costs:\nLVDC: ${cable_costs["LVDC"]["total_cost_usd"]/1e6:.1f}M\nMVAC: ${cable_costs["MVAC"]["total_cost_usd"]/1e6:.1f}M\nMVDC: ${cable_costs["MVDC"]["total_cost_usd"]/1e6:.1f}M'
     
     plt.text(0.02, 0.98, info_text, 
              transform=plt.gca().transAxes, verticalalignment='top',
              bbox=dict(boxstyle='round', facecolor='white', alpha=0.8),
-             fontsize=12)
+             fontsize=11)
     
     plt.tight_layout()
+    filename = f"wind_farm_layout_{layout_type}.png"
+    plt.savefig(filename, dpi=300, bbox_inches='tight')
     plt.show()
+    print(f"Plot saved as {filename}")
 
 
 def calculate_wind_farm_cables(num_turbines: int, 
                              turbine_rating_kw: float,
                              turbine_diameter_m: float, 
                              turbine_spacing_m: float,
-                             num_substations: int = 3) -> dict:
+                             num_substations: int = 3,
+                             layout_type: str = "radial") -> dict:
     """
     Main function to calculate wind farm cable requirements.
     
@@ -275,6 +530,7 @@ def calculate_wind_farm_cables(num_turbines: int,
         turbine_diameter_m: Diameter of each turbine in meters
         turbine_spacing_m: Spacing between turbines in meters
         num_substations: Number of substations (default 3)
+        layout_type: Cable layout type - "radial" or "branched"
         
     Returns:
         Dictionary with calculation results
@@ -286,6 +542,7 @@ def calculate_wind_farm_cables(num_turbines: int,
     print(f"Turbine diameter: {turbine_diameter_m} m")
     print(f"Turbine spacing: {turbine_spacing_m} m")
     print(f"Number of substations: {num_substations}")
+    print(f"Layout type: {layout_type}")
     print()
     
     # Generate turbine positions
@@ -297,13 +554,39 @@ def calculate_wind_farm_cables(num_turbines: int,
     # Assign turbines to closest substations
     assignments = assign_turbines_to_substations(turbine_positions, substation_positions)
     
-    # Calculate total cable length
-    total_cable_length = calculate_total_cable_length(turbine_positions, 
+    # Calculate cable layout and costs based on type
+    if layout_type.lower() == "branched":
+        # Create branched cable layout
+        cable_segments = create_branched_cable_layout(turbine_positions, 
                                                     substation_positions, 
                                                     assignments)
-    
-    # Calculate cable costs for different scenarios
-    cable_costs = calculate_cable_costs(total_cable_length)
+        
+        # Calculate total cable length
+        total_cable_length = calculate_total_cable_length_branched(cable_segments)
+        
+        # Calculate cable costs for branched layout
+        cable_costs = calculate_cable_costs_branched(cable_segments)
+        
+        # Print branched layout details
+        print("Branched Cable Layout:")
+        print("=" * 30)
+        print(f"Number of cable segments: {len(cable_segments)}")
+        
+        # Print segment details
+        for i, segment in enumerate(cable_segments):
+            print(f"Segment {i+1}: {segment['length_m']:.1f}m, {segment['cable_count']} cables")
+            
+    else:
+        # Use radial layout (original)
+        cable_segments = None
+        
+        # Calculate total cable length
+        total_cable_length = calculate_total_cable_length(turbine_positions, 
+                                                        substation_positions, 
+                                                        assignments)
+        
+        # Calculate cable costs for radial layout
+        cable_costs = calculate_cable_costs_radial(total_cable_length)
     
     # Print results
     print(f"Grid dimensions: {calculate_grid_dimensions(num_turbines)}")
@@ -333,7 +616,8 @@ def calculate_wind_farm_cables(num_turbines: int,
     
     # Create plot
     plot_wind_farm(turbine_positions, substation_positions, assignments, 
-                   turbine_diameter_m, total_cable_length, cable_costs)
+                   turbine_diameter_m, total_cable_length, cable_costs,
+                   cable_segments, layout_type)
     
     return {
         'total_cable_length_m': total_cable_length,
@@ -343,7 +627,9 @@ def calculate_wind_farm_cables(num_turbines: int,
         'cable_costs': cable_costs,
         'turbine_positions': turbine_positions,
         'substation_positions': substation_positions,
-        'assignments': assignments
+        'assignments': assignments,
+        'layout_type': layout_type,
+        'cable_segments': cable_segments
     }
 
 
@@ -357,11 +643,53 @@ if __name__ == "__main__":
     print(f"Using turbine spacing of {turbine_spacing_m} m (7 times diameter)")
     print()
     
-    # Calculate cable requirements
-    results = calculate_wind_farm_cables(
+    # Calculate cable requirements for both layouts
+    print("RADIAL LAYOUT ANALYSIS")
+    print("=" * 60)
+    results_radial = calculate_wind_farm_cables(
         num_turbines=num_turbines,
         turbine_rating_kw=turbine_rating_kw,
         turbine_diameter_m=turbine_diameter_m,
         turbine_spacing_m=turbine_spacing_m,
-        num_substations=3
+        num_substations=3,
+        layout_type="radial"
     )
+    
+    print("\n" + "=" * 60)
+    print("BRANCHED LAYOUT ANALYSIS")
+    print("=" * 60)
+    results_branched = calculate_wind_farm_cables(
+        num_turbines=num_turbines,
+        turbine_rating_kw=turbine_rating_kw,
+        turbine_diameter_m=turbine_diameter_m,
+        turbine_spacing_m=turbine_spacing_m,
+        num_substations=3,
+        layout_type="branched"
+    )
+    
+    # Compare results
+    print("\n" + "=" * 60)
+    print("COMPARISON ANALYSIS")
+    print("=" * 60)
+    
+    print(f"Cable Length Comparison:")
+    print(f"  Radial layout:   {results_radial['total_cable_length_km']:.2f} km")
+    print(f"  Branched layout: {results_branched['total_cable_length_km']:.2f} km")
+    print(f"  Difference:      {(results_branched['total_cable_length_km'] - results_radial['total_cable_length_km']):.2f} km")
+    print(f"  Savings:         {(1 - results_branched['total_cable_length_km']/results_radial['total_cable_length_km'])*100:.1f}%")
+    print()
+    
+    print("Cost Comparison (MVDC):")
+    radial_cost = results_radial['cable_costs']['MVDC']['total_cost_usd']
+    branched_cost = results_branched['cable_costs']['MVDC']['total_cost_usd']
+    print(f"  Radial layout:   ${radial_cost/1e6:.2f}M")
+    print(f"  Branched layout: ${branched_cost/1e6:.2f}M")
+    print(f"  Savings:         ${(radial_cost - branched_cost)/1e6:.2f}M ({(1 - branched_cost/radial_cost)*100:.1f}%)")
+    print()
+    
+    print("Installation Cost Benefits:")
+    radial_install = results_radial['cable_costs']['MVDC']['installation_cost_usd']
+    branched_install = results_branched['cable_costs']['MVDC']['installation_cost_usd']
+    print(f"  Radial installation:   ${radial_install/1e6:.2f}M")
+    print(f"  Branched installation: ${branched_install/1e6:.2f}M")
+    print(f"  Installation savings:  ${(radial_install - branched_install)/1e6:.2f}M ({(1 - branched_install/radial_install)*100:.1f}%)")
