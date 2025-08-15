@@ -32,7 +32,7 @@ def load_and_plot_sweep_results(show_percent_reduction=True):
     ]
     
     # Create a figure with subplots
-    fig, axes = plt.subplots(2, 1, figsize=(6, 10))
+    fig, axes = plt.subplots(1, 2, figsize=(10, 6))
     
     all_results = {}
     

@@ -70,7 +70,13 @@ def run_separate_efficiency_sweeps(type="dc"):
             12.75,
             14.68,
             ]
-    
+        
+    # Results from the cable layout costs
+    if type == "dc":
+        wind_installed_cost_mw = 1228308 + 15.289e6 / 450
+    elif type == "ac":
+        wind_installed_cost_mw = 1228308 + 20.385e6 / 450
+        
     # Convert battery availability losses to decimal format (divide by 100)
     battery_availability_losses = [loss/100 for loss in battery_availability_loss_percentages]
     
@@ -89,7 +95,7 @@ def run_separate_efficiency_sweeps(type="dc"):
     print(f"\n=== PV Efficiency Sweep (holding Wind Loss at {baseline_wind_loss}%, Battery Loss at {baseline_battery_loss*100:.2f}%) ===")
     pv_results = run_single_parameter_sweep(
         "pv", pv_efficiency_percentages, hopp_config_path,
-        baseline_pv_eff, baseline_wind_loss, baseline_battery_loss
+        baseline_pv_eff, baseline_wind_loss, baseline_battery_loss, wind_installed_cost_mw
     )
     
     # Save PV results
@@ -102,7 +108,7 @@ def run_separate_efficiency_sweeps(type="dc"):
     print(f"\n=== Wind Loss Sweep (holding PV Efficiency at {baseline_pv_eff}%, Battery Loss at {baseline_battery_loss*100:.2f}%) ===")
     wind_results = run_single_parameter_sweep(
         "wind", wind_loss_percentages, hopp_config_path,
-        baseline_pv_eff, baseline_wind_loss, baseline_battery_loss
+        baseline_pv_eff, baseline_wind_loss, baseline_battery_loss, wind_installed_cost_mw
     )
     
     # Save Wind results
@@ -115,7 +121,7 @@ def run_separate_efficiency_sweeps(type="dc"):
     print(f"\n=== Battery Availability Loss Sweep (holding PV Efficiency at {baseline_pv_eff}%, Wind Loss at {baseline_wind_loss}%) ===")
     battery_results = run_single_parameter_sweep(
         "battery", battery_availability_losses, hopp_config_path,
-        baseline_pv_eff, baseline_wind_loss, baseline_battery_loss
+        baseline_pv_eff, baseline_wind_loss, baseline_battery_loss, wind_installed_cost_mw
     )
     
     # Save Battery results
@@ -133,7 +139,7 @@ def run_separate_efficiency_sweeps(type="dc"):
     return pv_results, wind_results, battery_results
 
 
-def run_single_parameter_sweep(param_type, param_values, hopp_config_path, baseline_pv, baseline_wind, baseline_battery):
+def run_single_parameter_sweep(param_type, param_values, hopp_config_path, baseline_pv, baseline_wind, baseline_battery, wind_installed_cost_mw=0):
     """
     Run a sweep for a single parameter type, holding others constant.
     
@@ -144,6 +150,7 @@ def run_single_parameter_sweep(param_type, param_values, hopp_config_path, basel
         baseline_pv: Baseline PV efficiency
         baseline_wind: Baseline wind loss
         baseline_battery: Baseline battery availability loss
+        wind_installed_cost_mw: Modifier to add to wind installed cost
     """
     results_data = []
     
@@ -177,7 +184,7 @@ def run_single_parameter_sweep(param_type, param_values, hopp_config_path, basel
             print(f"Run {i+1}/{len(param_values)}: {param_name}={value}{param_units}")
         
         # Modify the hopp config file
-        modify_hopp_config_multi_params(hopp_config_path, pv_eff, wind_loss, batt_loss)
+        modify_hopp_config_multi_params(hopp_config_path, pv_eff, wind_loss, batt_loss, wind_installed_cost_mw)
         
         try:
             # Run the H2Integrate model
@@ -188,7 +195,8 @@ def run_single_parameter_sweep(param_type, param_values, hopp_config_path, basel
             # Extract results
             lcoe = gh.prob['financials_group_profast.LCOE'][0]
             lcoh = gh.prob['financials_group_profast.LCOH'][0]
-            
+            hydrogen_out = gh.prob['electrolyzer.hydrogen_out']
+
             # Store results
             result_entry = {
                 'parameter_type': param_type,
@@ -198,7 +206,8 @@ def run_single_parameter_sweep(param_type, param_values, hopp_config_path, basel
                 'battery_availability_loss': batt_loss,
                 'battery_availability_loss_percent': batt_loss * 100,
                 'lcoe': lcoe,
-                'lcoh': lcoh
+                'lcoh': lcoh,
+                'hydrogen_out': hydrogen_out
             }
             results_data.append(result_entry)
             
@@ -218,6 +227,7 @@ def run_single_parameter_sweep(param_type, param_values, hopp_config_path, basel
                 'battery_availability_loss_percent': batt_loss * 100,
                 'lcoe': None,
                 'lcoh': None,
+                'hydrogen_out': None,
                 'error': str(e)
             }
             results_data.append(result_entry)
@@ -244,12 +254,13 @@ def run_single_parameter_sweep(param_type, param_values, hopp_config_path, basel
     return results
 
 
-def modify_hopp_config_multi_params(config_path, pv_inverter_efficiency, wind_loss, battery_availability_loss):
+def modify_hopp_config_multi_params(config_path, pv_inverter_efficiency, wind_loss, battery_availability_loss, wind_installed_cost_mw=0):
     """
     Modify the hopp config file in place to set multiple parameters:
     - PV inverter efficiency (inv_eff)
     - Wind turbine electrical efficiency loss (elec_eff_loss) 
     - Battery availability loss (availability_loss)
+    - Wind installed cost modifier (added to wind_installed_cost_mw)
     """
     with open(config_path, 'r') as f:
         lines = f.readlines()
@@ -282,6 +293,28 @@ def modify_hopp_config_multi_params(config_path, pv_inverter_efficiency, wind_lo
                 new_line = f"{key}: {battery_availability_loss}\n"
                 new_lines.append(new_line)
                 continue
+        
+        # Update wind installed cost by adding the modifier to the base cost
+        elif 'wind_installed_cost_mw' in line and 'cost_info' in ''.join(lines[max(0, len(new_lines)-10):len(new_lines)]):
+            parts = line.split(':', 1)
+            if len(parts) == 2:
+                key, value_part = parts
+                # Extract the base cost value (remove comments if any)
+                base_cost_str = value_part.split('#')[0].strip()
+                try:
+                    base_cost = float(base_cost_str)
+                    new_cost = wind_installed_cost_mw
+                    # Preserve any comment that was in the original line
+                    if '#' in value_part:
+                        comment = '#' + value_part.split('#', 1)[1]
+                        new_line = f"{key}: {new_cost} {comment}"
+                    else:
+                        new_line = f"{key}: {new_cost}\n"
+                    new_lines.append(new_line)
+                    continue
+                except ValueError:
+                    # If we can't parse the cost, keep the original line
+                    pass
         
         new_lines.append(line)
 
@@ -387,7 +420,7 @@ def run_parameter_sweep(param_type, param_values, base_config):
             wind_loss = base_config['wind_loss']
             batt_loss = value
         
-        modify_hopp_config_multi_params(hopp_config_path, pv_eff, wind_loss, batt_loss)
+        modify_hopp_config_multi_params(hopp_config_path, pv_eff, wind_loss, batt_loss, 0)
         
         try:
             gh = H2IntegrateModel("wind_solar_battery.yaml")
