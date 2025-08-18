@@ -10,6 +10,9 @@ technologies:
       model: "hopp"
     financial_model:
       group: "profast"
+    model_inputs:
+      cost_parameters:
+        cost_year: 2022
   electrolyzer:
     financial_model:
       group: "profast"

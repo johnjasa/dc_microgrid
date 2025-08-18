@@ -63,7 +63,9 @@ config:
     pv_charging_only: false
     include_lifecycle_count: false
   cost_info: # using utility scale costs
-    wind_installed_cost_mw: 1262283.5555555555 # 2024 ATB for land-based wind class 1 moderate case year 2030 in 2022 USD
+    wind_installed_cost_mw: 1262283.5555555555 # 2024 ATB for land-based wind class 1 moderate case year 2030 in 2022 USD, LCOH=7.31118816
+    # wind_installed_cost_mw: 1273608. # 2024 ATB for land-based wind class 1 moderate case year 2030 in 2022 USD, LCOH=7.32756422
+    # wind_installed_cost_mw: 1681308. # 2024 ATB for land-based wind class 1 moderate case year 2030 in 2022 USD, LCOH=7.91713118
     solar_installed_cost_mw: 1043702.0 # 2024 ATB for utility pv moderate case year 2030 in 2022 USD
     storage_installed_cost_mwh: 245692.0 # based on 2024 ATB utility-scale capital cost for battery energy costs for year 2030 in 2022 USD
     storage_installed_cost_mw: 317384.0 # 2024 ATB moderate case for commercial-scale battery power capital costs year 2030 in 2022 USD
